@@ -1,143 +1,140 @@
 import os
 import re
-
 import aiofiles
 import aiohttp
-import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
-from unidecode import unidecode
 from ytSearch import VideosSearch
+from unidecode import unidecode
 
 from AnonXMusic import app
 from config import YOUTUBE_IMG_URL
 
 
 def changeImageSize(maxWidth, maxHeight, image):
-    widthRatio = maxWidth / image.size[0]
-    heightRatio = maxHeight / image.size[1]
-    newWidth = int(widthRatio * image.size[0])
-    newHeight = int(heightRatio * image.size[1])
-    newImage = image.resize((newWidth, newHeight))
-    return newImage
-
-def circle(img): 
-     h,w=img.size 
-     a = Image.new('L', [h,w], 0) 
-     b = ImageDraw.Draw(a) 
-     b.pieslice([(0, 0), (h,w)], 0, 360, fill = 255,outline = "white") 
-     c = np.array(img) 
-     d = np.array(a) 
-     e = np.dstack((c, d)) 
-     return Image.fromarray(e)
+    ratio = min(maxWidth / image.size[0], maxHeight / image.size[1])
+    return image.resize(
+        (int(image.size[0] * ratio), int(image.size[1] * ratio))
+    )
 
 
-def clear(text):
-    list = text.split(" ")
-    title = ""
-    for i in list:
-        if len(title) + len(i) < 60:
-            title += " " + i
-    return title.strip()
+def fit_text(draw, text, font, max_width):
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while draw.textlength(text + "...", font=font) > max_width:
+        text = text[:-1]
+    return text + "..."
 
 
-async def get_thumb(videoid,user_id):
-    if os.path.isfile(f"cache/{videoid}_{user_id}.png"):
-        return f"cache/{videoid}_{user_id}.png"
+def rounded_rectangle(draw, xy, radius, fill):
+    draw.rounded_rectangle(xy, radius=radius, fill=fill)
 
-    url = f"https://www.youtube.com/watch?v={videoid}"
+
+async def get_thumb(videoid, user_id):
     try:
-        results = VideosSearch(url, limit=1)
-        for result in (await results.next())["result"]:
-            try:
-                title = result["title"]
-                title = re.sub("\W+", " ", title)
-                title = title.title()
-            except:
-                title = "Unsupported Title"
-            try:
-                duration = result["duration"]
-            except:
-                duration = "Unknown Mins"
-            thumbnail = result["thumbnails"][0]["url"].split("?")[0]
-            try:
-                views = result["viewCount"]["short"]
-            except:
-                views = "Unknown Views"
-            try:
-                channel = result["channel"]["name"]
-            except:
-                channel = "Unknown Channel"
+        path = f"cache/{videoid}_{user_id}.png"
+        if os.path.isfile(path):
+            return path
+
+        search = VideosSearch(
+            f"https://www.youtube.com/watch?v={videoid}", limit=1
+        )
+        result = (await search.next())["result"][0]
+
+        title = result.get("title", "Unknown Title")
+        title = " ".join(title.split()[:4])  # max 3–4 words
+        duration = result.get("duration", "00:00")
+        channel = result.get("channel", {}).get("name", "")
+        thumb_url = result["thumbnails"][0]["url"].split("?")[0]
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(thumbnail) as resp:
-                if resp.status == 200:
-                    f = await aiofiles.open(f"cache/thumb{videoid}.png", mode="wb")
-                    await f.write(await resp.read())
-                    await f.close()
-        try:
-            async for photo in app.get_chat_photos(user_id,1):
-                sp=await app.download_media(photo.file_id, file_name=f'{user_id}.jpg')
-        except:
-            async for photo in app.get_chat_photos(app.id,1):
-                sp=await app.download_media(photo.file_id, file_name=f'{app.id}.jpg')
+            async with session.get(thumb_url) as r:
+                async with aiofiles.open("cache/temp.png", "wb") as f:
+                    await f.write(await r.read())
 
-        xp=Image.open(sp)
+        yt = Image.open("cache/temp.png").convert("RGBA")
 
-        youtube = Image.open(f"cache/thumb{videoid}.png")
-        image1 = changeImageSize(1280, 720, youtube)
-        image2 = image1.convert("RGBA")
-        background = image2.filter(filter=ImageFilter.BoxBlur(10))
-        enhancer = ImageEnhance.Brightness(background)
-        background = enhancer.enhance(0.5)
-        y=changeImageSize(200,200,circle(youtube)) 
-        background.paste(y,(45,225),mask=y)
-        a=changeImageSize(200,200,circle(xp)) 
-        background.paste(a,(1045,225),mask=a)
-        draw = ImageDraw.Draw(background)
-        arial = ImageFont.truetype("AnonXMusic/assets/font2.ttf", 30)
-        font = ImageFont.truetype("AnonXMusic/assets/font.ttf", 30)
-        draw.text((1110, 8), unidecode(app.name), fill="white", font=arial)
+        base = changeImageSize(1280, 720, yt)
+        bg = base.filter(ImageFilter.GaussianBlur(15))
+        bg = ImageEnhance.Brightness(bg).enhance(0.45)
+
+        draw = ImageDraw.Draw(bg)
+
+        # 🎵 PLAYER BAR
+        bar_x1, bar_y1 = 220, 160
+        bar_x2, bar_y2 = 1060, 520
+        rounded_rectangle(
+            draw,
+            (bar_x1, bar_y1, bar_x2, bar_y2),
+            radius=40,
+            fill=(40, 40, 40, 220),
+        )
+
+        # 🎶 Song Thumbnail (rounded rectangle)
+        song_thumb = changeImageSize(200, 200, yt)
+        mask = Image.new("L", song_thumb.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, song_thumb.size[0], song_thumb.size[1]),
+            radius=30,
+            fill=255,
+        )
+        bg.paste(song_thumb, (260, 210), mask)
+
+        # Fonts
+        font_title = ImageFont.truetype(
+            "AnonXMusic/assets/font.ttf", 32
+        )
+        font_small = ImageFont.truetype(
+            "AnonXMusic/assets/font2.ttf", 26
+        )
+
+        # Title (SAFE WIDTH)
+        safe_title = fit_text(draw, title, font_title, 420)
+        draw.text((500, 235), safe_title, fill="white", font=font_title)
+        draw.text((500, 275), channel, fill="lightgray", font=font_small)
+
+        # ⏳ Progress bar
+        draw.rounded_rectangle(
+            (500, 330, 960, 345),
+            radius=10,
+            fill=(120, 120, 120),
+        )
+        draw.rounded_rectangle(
+            (500, 330, 720, 345),
+            radius=10,
+            fill=(255, 255, 255),
+        )
+
+        draw.text((500, 355), "00:00", fill="white", font=font_small)
+        draw.text((915, 355), duration, fill="white", font=font_small)
+
+        # ⏯ Buttons
+        cy = 430
+
+        # Previous
+        draw.polygon([(610, cy), (630, cy - 15), (630, cy + 15)], fill="white")
+        draw.polygon([(630, cy), (650, cy - 15), (650, cy + 15)], fill="white")
+
+        # Play
+        draw.polygon(
+            [(705, cy - 18), (705, cy + 18), (740, cy)],
+            fill="white",
+        )
+
+        # Next
+        draw.polygon([(800, cy), (780, cy - 15), (780, cy + 15)], fill="white")
+        draw.polygon([(820, cy), (800, cy - 15), (800, cy + 15)], fill="white")
+
+        # Bot Name
         draw.text(
-                (55, 560),
-                f"{channel} | {views[:23]}",
-                (255, 255, 255),
-                font=arial,
-            )
-        draw.text(
-                (57, 600),
-                clear(title),
-                (255, 255, 255),
-                font=font,
-            )
-        draw.line(
-                [(55, 660), (1220, 660)],
-                fill="white",
-                width=5,
-                joint="curve",
-            )
-        draw.ellipse(
-                [(918, 648), (942, 672)],
-                outline="white",
-                fill="white",
-                width=15,
-            )
-        draw.text(
-                (36, 685),
-                "00:00",
-                (255, 255, 255),
-                font=arial,
-            )
-        draw.text(
-                (1185, 685),
-                f"{duration[:23]}",
-                (255, 255, 255),
-                font=arial,
-            )
-        try:
-            os.remove(f"cache/thumb{videoid}.png")
-        except:
-            pass
-        background.save(f"cache/{videoid}_{user_id}.png")
-        return f"cache/{videoid}_{user_id}.png"
+            (1050, 20),
+            unidecode(app.name),
+            fill="white",
+            font=font_small,
+        )
+
+        bg.save(path)
+        os.remove("cache/temp.png")
+        return path
+
     except Exception:
         return YOUTUBE_IMG_URL
